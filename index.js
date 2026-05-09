@@ -6,7 +6,13 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const port = process.env.PORT || 4000;
 const stripe = require('stripe')(process.env.PAYMENT_GATEWAY_KEY);
 
-app.use(cors())
+app.use(
+  cors({
+    origin: [
+      'http://localhost:5173',
+      'https://green-basket-website.vercel.app']
+  })
+)
 app.use(express.json());
 
 
