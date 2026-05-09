@@ -10,9 +10,12 @@ app.use(
   cors({
     origin: [
       'http://localhost:5173',
-      'https://green-basket-website.vercel.app']
+      'https://green-basket-website.vercel.app'
+    ],
+    credentials: true
   })
 )
+
 app.use(express.json());
 
 
