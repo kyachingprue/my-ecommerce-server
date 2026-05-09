@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 const app = express();
-const admin = require('firebase-admin');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const port = process.env.PORT || 4000;
 const stripe = require('stripe')(process.env.PAYMENT_GATEWAY_KEY);
@@ -16,21 +15,11 @@ app.use(
       'https://green-basket-website-git-main-kyachingprue-marmas-projects.vercel.app',
       'https://green-basket-website-51gje32gz-kyachingprue-marmas-projects.vercel.app',
     ],
-    credentials: true
+    credentials: true,
   })
 )
 app.use(express.json());
 
-const serviceAccount = {
-  type: process.env.FIREBASE_TYPE,
-  project_id: process.env.FIREBASE_PROJECT_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  client_email: process.env.FIREBASE_CLIENT_EMAIL,
-};
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.nhw49.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
@@ -61,25 +50,6 @@ async function run() {
       .db('greenBasket')
       .collection('seller-requests');
 
-    const verifyFBToken = async (req, res, next) => {
-      const authHeader = req.headers.authorization;
-
-      if (!authHeader) {
-        return res.status(401).send({ message: 'Unauthorized access' });
-      }
-      const token = authHeader.split(' ')[1];
-      if (!token) {
-        return res.status(401).send({ message: 'Unauthorized access' });
-      }
-      // verify token
-      try {
-        const decoded = await admin.auth().verifyIdToken(token);
-        req.decoded = decoded;
-        next();
-      } catch (error) {
-        return res.status(403).send({ message: 'Forbidden access' });
-      }
-    };
 
     app.get('/products', async (req, res) => {
       try {
@@ -228,7 +198,7 @@ async function run() {
     });
 
     // Create PaymentIntent
-    app.post('/create-payment-intent', verifyFBToken, async (req, res) => {
+    app.post('/create-payment-intent', async (req, res) => {
       try {
         const { productId } = req.body;
         const product = await productCollection.findOne({
@@ -258,12 +228,9 @@ async function run() {
     });
 
     // Get payment history for a user (descending)
-    app.get('/payments/:email', verifyFBToken, async (req, res) => {
+    app.get('/payments/:email', async (req, res) => {
       try {
         const email = req.params.email;
-        if (req.decoded.email !== email) {
-          return res.status(403).send({ message: 'Forbidden access' });
-        }
         const payments = await paymentCollection
           .find({ user_email: email })
           .sort({ createdAt: -1 })
@@ -279,7 +246,7 @@ async function run() {
     });
 
     // Save Payment Info & Update Product
-    app.post('/payments', verifyFBToken, async (req, res) => {
+    app.post('/payments', async (req, res) => {
       try {
         const { productId, userEmail, amount, paymentIntentId } = req.body;
 
@@ -333,7 +300,7 @@ async function run() {
     });
 
     // My Orders API
-    app.get('/orders', verifyFBToken, async (req, res) => {
+    app.get('/orders', async (req, res) => {
       try {
         const email = req.query.email;
         const query = email ? { user_email: email } : {};
