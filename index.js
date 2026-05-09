@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 const app = express();
-const jwt = require('jsonwebtoken');
 const admin = require('firebase-admin');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const port = process.env.PORT || 4000;
@@ -10,13 +9,23 @@ const stripe = require('stripe')(process.env.PAYMENT_GATEWAY_KEY);
 
 app.use(
   cors({
-    origin: 'http://localhost:5173',
-    credentials: true,
+    origin: [
+      'http://localhost:5173',
+      'https://analytics-chemical-auth.web.app',
+      'https://green-basket-website.vercel.app',
+      
+    ],
+    credentials: true
   })
-);
+)
 app.use(express.json());
 
-const serviceAccount = require('./firebase-admin-key.json');
+const serviceAccount = {
+  type: process.env.FIREBASE_TYPE,
+  project_id: process.env.FIREBASE_PROJECT_ID,
+  private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  client_email: process.env.FIREBASE_CLIENT_EMAIL,
+};
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -36,12 +45,12 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
     // Send a ping to confirm a successful connection
-    await client.db('admin').command({ ping: 1 });
-    console.log(
-      'Pinged your deployment. You successfully connected to MongoDB!'
-    );
+    // await client.db('admin').command({ ping: 1 });
+    // console.log(
+    //   'Pinged your deployment. You successfully connected to MongoDB!'
+    // );
 
     const productCollection = client.db('greenBasket').collection('products');
     const ordersCollection = client.db('greenBasket').collection('orders');
@@ -557,7 +566,7 @@ async function run() {
 run().catch(console.dir);
 
 app.get('/', (req, res) => {
-  res.send('Hello World!');
+  res.send('GreeBasket server side project');
 });
 
 app.listen(port, () => {
