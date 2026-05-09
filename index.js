@@ -13,7 +13,8 @@ app.use(
       'http://localhost:5173',
       'https://analytics-chemical-auth.web.app',
       'https://green-basket-website.vercel.app',
-      
+      'https://green-basket-website-git-main-kyachingprue-marmas-projects.vercel.app',
+      'https://green-basket-website-51gje32gz-kyachingprue-marmas-projects.vercel.app',
     ],
     credentials: true
   })
