@@ -32,13 +32,6 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
-    // await client.connect();
-    // Send a ping to confirm a successful connection
-    // await client.db('admin').command({ ping: 1 });
-    // console.log(
-    //   'Pinged your deployment. You successfully connected to MongoDB!'
-    // );
 
     const productCollection = client.db('greenBasket').collection('products');
     const ordersCollection = client.db('greenBasket').collection('orders');
@@ -166,7 +159,10 @@ async function run() {
     // user role AIP
     app.get('/users', async (req, res) => {
       try {
-        const users = await usersCollection.find({}).toArray();
+        const users = await usersCollection
+          .find({})
+          .project({ password: 0, passwordHash: 0 })
+          .toArray();
         res.status(200).json(users);
       } catch (error) {
         console.error('Error fetching users:', error);
@@ -177,22 +173,120 @@ async function run() {
     });
 
     app.get('/users/:email', async (req, res) => {
-      const email = req.params.email;
-      const user = await usersCollection.findOne({ email });
+      const email = req.params.email.trim().toLowerCase();
+      const user = await usersCollection.findOne(
+        { email },
+        { projection: { password: 0, passwordHash: 0 } }
+      );
       res.send(user || {});
     });
 
     app.post('/users', async (req, res) => {
-      const email = req.body.email;
-      const userExists = await usersCollection.findOne({ email });
-      if (userExists) {
-        return res
-          .status(200)
-          .send({ message: 'User already exists', insertedId: false });
+      try {
+        const body = req.body || {};
+        const email = typeof body.email === 'string'
+          ? body.email.trim().toLowerCase()
+          : '';
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+
+        if (
+          !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+          !name ||
+          name.length > 100 ||
+          (typeof body.profileImage === 'string' && body.profileImage.length > 2048)
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: 'A valid email and full name are required',
+          });
+        }
+
+        const existingUser = await usersCollection.findOne({ email });
+        if (existingUser) {
+          return res.status(200).json({
+            success: true,
+            message: 'User already exists',
+            insertedId: false,
+          });
+        }
+
+        const user = {
+          name,
+          email,
+          profileImage:
+            typeof body.profileImage === 'string'
+              ? body.profileImage.trim()
+              : '',
+          role: 'user',
+          address: '',
+          phone: '',
+          bio: '',
+          created_at: new Date().toISOString(),
+          last_login: new Date().toISOString(),
+        };
+        const result = await usersCollection.insertOne(user);
+        res.status(201).json({ success: true, insertedId: result.insertedId });
+      } catch (error) {
+        console.error('Error creating user profile:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to create user profile',
+        });
       }
-      const user = req.body;
-      const result = await usersCollection.insertOne(user);
-      res.send(result);
+    });
+
+    app.patch('/users/:email', async (req, res) => {
+      try {
+        const email = req.params.email.trim().toLowerCase();
+        const body = req.body || {};
+        const editableFields = {
+          name: 100,
+          profileImage: 2048,
+          address: 500,
+          phone: 40,
+          bio: 1000,
+        };
+        const updates = {};
+
+        for (const [field, maxLength] of Object.entries(editableFields)) {
+          if (Object.prototype.hasOwnProperty.call(body, field)) {
+            if (
+              typeof body[field] !== 'string' ||
+              body[field].length > maxLength
+            ) {
+              return res.status(400).json({
+                success: false,
+                message: `${field} must be a string of at most ${maxLength} characters`,
+              });
+            }
+            updates[field] = body[field].trim();
+          }
+        }
+
+        if (Object.keys(updates).length === 0 || (updates.name !== undefined && !updates.name)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Provide valid profile fields to update',
+          });
+        }
+
+        const result = await usersCollection.updateOne({ email }, { $set: updates });
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ success: false, message: 'User not found' });
+        }
+
+        const user = await usersCollection.findOne(
+          { email },
+          { projection: { password: 0, passwordHash: 0 } }
+        );
+        res.status(200).json({ success: true, user });
+      } catch (error) {
+        console.error('Error updating user profile:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to update user profile',
+        });
+      }
     });
 
     // Create PaymentIntent
