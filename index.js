@@ -292,7 +292,19 @@ async function run() {
     // Create PaymentIntent
     app.post('/create-payment-intent', async (req, res) => {
       try {
-        const { productId } = req.body;
+        const { productId, orderId, userEmail } = req.body;
+        if (
+          !ObjectId.isValid(productId) ||
+          typeof userEmail !== 'string' ||
+          !userEmail.trim()
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: 'A valid product and customer email are required',
+          });
+        }
+
+        const normalizedEmail = userEmail.trim().toLowerCase();
         const product = await productCollection.findOne({
           _id: new ObjectId(productId),
         });
@@ -300,7 +312,32 @@ async function run() {
         if (!product)
           return res.status(404).json({ error: 'Product not found' });
 
+        const orderQuery = {
+          productId: product._id.toString(),
+          user_email: normalizedEmail,
+          order_status: { $ne: 'paid' },
+        };
+        if (orderId) {
+          if (!ObjectId.isValid(orderId)) {
+            return res.status(400).json({ success: false, message: 'Invalid order' });
+          }
+          orderQuery._id = new ObjectId(orderId);
+        }
+        const order = await ordersCollection.findOne(orderQuery);
+        if (!order) {
+          return res.status(404).json({
+            success: false,
+            message: 'An unpaid order for this product was not found',
+          });
+        }
+
         const amount = Math.round(product.price * 100);
+        if (!Number.isSafeInteger(amount) || amount <= 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'Product price is invalid',
+          });
+        }
 
         const paymentIntent = await stripe.paymentIntents.create({
           amount,
@@ -309,10 +346,15 @@ async function run() {
           metadata: {
             productId: product._id.toString(),
             productTitle: product.title,
+            orderId: order._id.toString(),
+            userEmail: normalizedEmail,
           },
         });
 
-        res.json({ clientSecret: paymentIntent.client_secret });
+        res.json({
+          clientSecret: paymentIntent.client_secret,
+          orderId: order._id.toString(),
+        });
       } catch (err) {
         console.error('create-payment-intent error:', err);
         res.status(500).json({ error: 'Internal server error' });
@@ -337,51 +379,98 @@ async function run() {
       }
     });
 
-    // Save Payment Info & Update Product
+    // Verify payment and update the corresponding order
     app.post('/payments', async (req, res) => {
       try {
-        const { productId, userEmail, amount, paymentIntentId } = req.body;
+        const { paymentIntentId } = req.body;
+        if (!paymentIntentId) {
+          return res.status(400).json({
+            success: false,
+            message: 'A payment intent is required',
+          });
+        }
 
-        // Find product
+        const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+        if (paymentIntent.status !== 'succeeded') {
+          return res.status(400).json({
+            success: false,
+            message: 'Payment has not succeeded',
+          });
+        }
+
+        const { productId, orderId, userEmail } = paymentIntent.metadata;
+        if (!productId || !ObjectId.isValid(orderId) || !userEmail) {
+          return res.status(400).json({
+            success: false,
+            message: 'Payment is not associated with a valid order',
+          });
+        }
+
+        const normalizedEmail = userEmail.trim().toLowerCase();
         const product = await productCollection.findOne({
           _id: new ObjectId(productId),
         });
-        if (!product)
-          return res
-            .status(404)
-            .json({ success: false, message: 'Product not found' });
+        if (!product) {
+          return res.status(404).json({ success: false, message: 'Product not found' });
+        }
 
-        // ✅ Update product payment_status
-        await productCollection.updateOne(
-          { _id: new ObjectId(productId) },
-          { $set: { payment_status: 'paid' } }
-        );
+        const expectedAmount = Math.round(product.price * 100);
+        const expectedCurrency = (product.currency || 'bdt').toLowerCase();
+        if (
+          paymentIntent.amount_received !== expectedAmount ||
+          paymentIntent.currency !== expectedCurrency
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: 'Payment amount does not match the order',
+          });
+        }
 
-        // ✅ Update order status for this user and product
+        const order = await ordersCollection.findOne({
+          _id: new ObjectId(orderId),
+          productId,
+          user_email: normalizedEmail,
+        });
+        if (!order) {
+          return res.status(404).json({ success: false, message: 'Order not found' });
+        }
+
         await ordersCollection.updateOne(
-          { productId: productId, user_email: userEmail },
-          { $set: { status: 'confirmed', order_status: 'paid' } }
+          { _id: order._id },
+          {
+            $set: {
+              order_status: 'paid',
+              status: order.status === 'pending' ? 'confirmed' : order.status,
+              paymentIntentId,
+              paidAt: new Date(),
+            },
+          }
         );
 
-        // ✅ Save payment record
         const paymentDoc = {
           productId,
+          orderId,
           title: product.title,
-          amount,
+          amount: paymentIntent.amount_received / 100,
           currency: product.currency || 'BDT',
-          user_email: userEmail,
+          user_email: normalizedEmail,
+          seller_email: product.seller?.email || order.seller_email || '',
           paymentIntentId,
           status: 'succeeded',
           createdAt_string: new Date().toISOString(),
           createdAt: new Date(),
         };
 
-        const result = await paymentCollection.insertOne(paymentDoc);
+        const result = await paymentCollection.updateOne(
+          { paymentIntentId },
+          { $setOnInsert: paymentDoc },
+          { upsert: true }
+        );
 
         res.status(200).json({
           success: true,
           message: 'Payment recorded successfully',
-          paymentId: result.insertedId,
+          paymentId: result.upsertedId || paymentIntentId,
         });
       } catch (err) {
         console.error('Error saving payment:', err);
@@ -423,13 +512,16 @@ async function run() {
             const product = await productCollection.findOne({
               _id: new ObjectId(payment.productId),
             });
-            const order = await ordersCollection.findOne({
-              productId: payment.productId,
-              user_email: email,
-            });
+            const order = payment.orderId && ObjectId.isValid(payment.orderId)
+              ? await ordersCollection.findOne({ _id: new ObjectId(payment.orderId) })
+              : await ordersCollection.findOne({
+                  productId: payment.productId,
+                  user_email: email,
+                });
 
             return {
               _id: payment._id,
+              orderId: payment.orderId,
               productTitle: product?.title || 'Unknown',
               productImage: product?.image || '',
               price: payment.amount,
@@ -464,13 +556,43 @@ async function run() {
     });
 
     app.patch('/orders/:id', async (req, res) => {
-      const id = req.params.id;
-      const { status } = req.body;
-      const query = { _id: new ObjectId(id) };
-      const updateDoc = { $set: { status } };
+      try {
+        const id = req.params.id;
+        const { status } = req.body;
+        const allowedStatuses = [
+          'confirmed',
+          'processing',
+          'packaging',
+          'shipped',
+          'out for delivery',
+          'delivered',
+          'cancelled',
+        ];
+        if (!ObjectId.isValid(id) || !allowedStatuses.includes(status)) {
+          return res.status(400).json({
+            success: false,
+            message: 'A valid order and tracking status are required',
+          });
+        }
 
-      const result = await ordersCollection.updateOne(query, updateDoc);
-      res.send(result);
+        const result = await ordersCollection.updateOne(
+          { _id: new ObjectId(id), order_status: 'paid' },
+          { $set: { status, updatedAt: new Date() } }
+        );
+        if (result.matchedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: 'Paid order not found',
+          });
+        }
+        res.send(result);
+      } catch (error) {
+        console.error('Error updating order status:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to update order status',
+        });
+      }
     });
 
     // Get all seller requests (Admin panel)
@@ -494,7 +616,7 @@ async function run() {
 
         // Get orders for these products
         const orders = await ordersCollection
-          .find({ productId: { $in: productIds } })
+          .find({ productId: { $in: productIds }, order_status: 'paid' })
           .toArray();
 
         // Attach product title to each order
@@ -505,6 +627,7 @@ async function run() {
           return {
             ...order,
             productTitle: product?.title || 'Unknown Product',
+            productImage: product?.image || '',
           };
         });
 
@@ -514,6 +637,43 @@ async function run() {
         res
           .status(500)
           .json({ success: false, message: 'Internal server error' });
+      }
+    });
+
+    app.get('/admin-orders', async (req, res) => {
+      try {
+        const orders = await ordersCollection
+          .find({ order_status: 'paid' })
+          .sort({ paidAt: -1 })
+          .toArray();
+        const productIds = [...new Set(orders.map(order => order.productId))]
+          .filter(ObjectId.isValid)
+          .map(id => new ObjectId(id));
+        const products = await productCollection
+          .find({ _id: { $in: productIds } })
+          .project({ _id: 1, title: 1, image: 1 })
+          .toArray();
+        const productById = new Map(
+          products.map(product => [product._id.toString(), product])
+        );
+
+        res.json({
+          success: true,
+          data: orders.map(order => {
+            const product = productById.get(order.productId);
+            return {
+              ...order,
+              productTitle: product?.title || order.title || 'Unknown Product',
+              productImage: product?.image || order.image || '',
+            };
+          }),
+        });
+      } catch (error) {
+        console.error('Error fetching admin orders:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch orders',
+        });
       }
     });
 
